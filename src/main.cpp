@@ -4,10 +4,13 @@
 #include <string>
 #include "json.hpp"
 #include "PID.h"
+#include <iomanip>
+
 
 // for convenience
 using nlohmann::json;
 using std::string;
+using std::get;
 
 // For converting back and forth between radians and degrees.
 constexpr double pi() { return M_PI; }
@@ -33,12 +36,15 @@ string hasData(string s) {
 int main() {
   uWS::Hub h;
 
-  PID pid;
+  int msg_cnt;
+
+  //PID pid(0.02, 0.0004, 0.03); // order is p, i, d
+  PID pid(0.02, 0.000, 0.00); // order is p, i, d
   /**
    * TODO: Initialize the pid variable.
    */
 
-  h.onMessage([&pid](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, 
+  h.onMessage([&pid, &msg_cnt](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, 
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -50,13 +56,17 @@ int main() {
         auto j = json::parse(s);
 
         string event = j[0].get<string>();
+        if (msg_cnt < 10) {
+          std::cout << j.dump() << std::endl;
+        }
 
         if (event == "telemetry") {
           // j[1] is the data JSON object
           double cte = std::stod(j[1]["cte"].get<string>());
           double speed = std::stod(j[1]["speed"].get<string>());
-          double angle = std::stod(j[1]["steering_angle"].get<string>());
-          double steer_value;
+          //double angle = std::stod(j[1]["steering_angle"].get<string>());
+          pid.UpdateError( cte );
+          double steer_value = pid.SteerValue() ;
           /**
            * TODO: Calculate steering value here, remember the steering value is
            *   [-1, 1].
@@ -65,14 +75,17 @@ int main() {
            */
           
           // DEBUG
-          std::cout << "CTE: " << cte << " Steering Value: " << steer_value 
+          auto err_parts = pid.ErrorParts();
+          std::cout << std::setprecision(4) 
+                    << "speed: " << speed << " CTE: " << cte << " Steering Value: " << steer_value 
+                    << " errors: " << get<0>( err_parts ) << " " << get<1>( err_parts ) << " "<< get<2>( err_parts )
                     << std::endl;
 
           json msgJson;
           msgJson["steering_angle"] = steer_value;
           msgJson["throttle"] = 0.3;
           auto msg = "42[\"steer\"," + msgJson.dump() + "]";
-          std::cout << msg << std::endl;
+          //std::cout << msg << std::endl;
           ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
         }  // end "telemetry" if
       } else {
@@ -80,14 +93,16 @@ int main() {
         string msg = "42[\"manual\",{}]";
         ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
       }
+
+      msg_cnt++;
     }  // end websocket message if
   }); // end h.onMessage
 
-  h.onConnection([&h](uWS::WebSocket<uWS::SERVER> ws, uWS::HttpRequest req) {
+  h.onConnection([&](uWS::WebSocket<uWS::SERVER> ws, uWS::HttpRequest req) {
     std::cout << "Connected!!!" << std::endl;
   });
 
-  h.onDisconnection([&h](uWS::WebSocket<uWS::SERVER> ws, int code, 
+  h.onDisconnection([&](uWS::WebSocket<uWS::SERVER> ws, int code, 
                          char *message, size_t length) {
     ws.close();
     std::cout << "Disconnected" << std::endl;
