@@ -1,5 +1,6 @@
-#include <math.h>
+#include <cmath>
 #include <uWS/uWS.h>
+#include <ostream>
 #include <iostream>
 #include <string>
 #include "json.hpp"
@@ -9,8 +10,10 @@
 
 // for convenience
 using nlohmann::json;
-using std::string;
-using std::get;
+using namespace std;
+using std::ostream;
+
+constexpr bool VERBOSE = false;
 
 // For converting back and forth between radians and degrees.
 constexpr double pi() { return M_PI; }
@@ -33,19 +36,89 @@ string hasData(string s) {
   return "";
 }
 
-int main() {
-  uWS::Hub h;
+struct Params {
+  double kp, ki, kd, throttle;
+  double smooth_alpha = 0.0; 
+};
+
+struct State {
+  double cte;
+  double speed;
+
+  double smooth_steer = 0;
 
   int msg_cnt;
+  double integ_abs_cte = 0.0 ;
+  double integ_cte = 0.0;
+  double integ_speed = 0.0 ;
+};
+
+using std::pair;
+
+inline void final_output( ostream& os, const State& state, const Params& pars ) {
+  os << std::fixed << std::setprecision(7) << pars.kp << "\t" << pars.ki << "\t" << pars.kd << "\t" << pars.throttle 
+          << "\t" << state.msg_cnt << "\t" << state.integ_abs_cte / state.msg_cnt << "\t" << state.integ_cte / state.msg_cnt 
+          << "\t" << state.integ_speed * 0.02 << endl;
+    
+}
+
+pair<double, double>  process( const Params& pars, PID &pid, State &state ) {
+  state.integ_abs_cte += fabs( state.cte );
+  state.integ_speed += state.speed;
+  
+  if( fabs( state.cte ) > 3.0  || state.msg_cnt >= 10000 ) {
+    auto err_parts = pid.ErrorParts();
+    state.integ_cte = get<1>( err_parts );
+    final_output( cout, state, pars );
+    final_output( cerr, state, pars );
+    exit(1);
+  }
+  state.msg_cnt++;
+  //double angle = std::stod(j[1]["steering_angle"].get<string>());
+  pid.UpdateError( state.cte );
+  double steer_value = pid.SteerValue() ;
+  state.smooth_steer = state.smooth_steer * pars.smooth_alpha + ( 1.0 - pars.smooth_alpha ) * steer_value;
+  
+  auto err_parts = pid.ErrorParts();
+
+  if( VERBOSE ) {
+    cerr  << std:: fixed <<  std::setprecision(4) 
+          << state.msg_cnt << " speed: " << state.speed << " CTE: " << state.cte << " Steering Value: " << state.smooth_steer 
+          << " errors: " << get<0>( err_parts ) << " " << get<1>( err_parts ) << " "<< get<2>( err_parts )
+          << " dist: " << state.integ_speed * 0.02
+          << std::endl;
+  }
+
+  return std::make_pair(state.smooth_steer, pars.throttle );
+}
+
+
+int main(int narg, char **argv) {
+
+  State state;
+  Params pars;
+
+  assert( narg == 5 );
+  
+  pars.kp = atof( argv[1] );
+  pars.ki = atof( argv[2] );
+  pars.kd = atof( argv[3] );
+  pars.throttle = atof( argv[4] );
+
+  uWS::Hub h;
 
   //PID pid(0.02, 0.0004, 0.03); // order is p, i, d
-  PID pid(0.02, 0.000, 0.00); // order is p, i, d
+  //PID pid(0.04, 0.000, 0.00); 
+  //PID pid(0.10, 0.000, 0.001); // 4000 steps
+  //PID pid(0.02, 0.000, 0.001); // 1586 steps
+  PID pid(pars.kp, pars.ki, pars.kd ); // 1586 steps
+
   /**
    * TODO: Initialize the pid variable.
-   */
+   */ 
 
-  h.onMessage([&pid, &msg_cnt](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, 
-                     uWS::OpCode opCode) {
+  h.onMessage([ &pid, &state, &pars]
+              (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
     // The 2 signifies a websocket event
@@ -56,34 +129,18 @@ int main() {
         auto j = json::parse(s);
 
         string event = j[0].get<string>();
-        if (msg_cnt < 10) {
-          std::cout << j.dump() << std::endl;
-        }
+        //if (msg_cnt < 1) { cerr << j.dump() << endl; }
 
         if (event == "telemetry") {
           // j[1] is the data JSON object
-          double cte = std::stod(j[1]["cte"].get<string>());
-          double speed = std::stod(j[1]["speed"].get<string>());
-          //double angle = std::stod(j[1]["steering_angle"].get<string>());
-          pid.UpdateError( cte );
-          double steer_value = pid.SteerValue() ;
-          /**
-           * TODO: Calculate steering value here, remember the steering value is
-           *   [-1, 1].
-           * NOTE: Feel free to play around with the throttle and speed.
-           *   Maybe use another PID controller to control the speed!
-           */
+          state.cte = std::stod(j[1]["cte"].get<string>());
+          state.speed = std::stod(j[1]["speed"].get<string>());
           
-          // DEBUG
-          auto err_parts = pid.ErrorParts();
-          std::cout << std::setprecision(4) 
-                    << "speed: " << speed << " CTE: " << cte << " Steering Value: " << steer_value 
-                    << " errors: " << get<0>( err_parts ) << " " << get<1>( err_parts ) << " "<< get<2>( err_parts )
-                    << std::endl;
-
+          auto result = process( pars, pid, state );
+          
           json msgJson;
-          msgJson["steering_angle"] = steer_value;
-          msgJson["throttle"] = 0.3;
+          msgJson["steering_angle"] = result.first;
+          msgJson["throttle"] = result.second;
           auto msg = "42[\"steer\"," + msgJson.dump() + "]";
           //std::cout << msg << std::endl;
           ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
@@ -94,23 +151,23 @@ int main() {
         ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
       }
 
-      msg_cnt++;
+      
     }  // end websocket message if
   }); // end h.onMessage
 
   h.onConnection([&](uWS::WebSocket<uWS::SERVER> ws, uWS::HttpRequest req) {
-    std::cout << "Connected!!!" << std::endl;
+    std::cerr << "Connected!!!" << std::endl;
   });
 
   h.onDisconnection([&](uWS::WebSocket<uWS::SERVER> ws, int code, 
                          char *message, size_t length) {
     ws.close();
-    std::cout << "Disconnected" << std::endl;
+    std::cerr << "Disconnected" << std::endl;
   });
 
   int port = 4567;
   if (h.listen(port)) {
-    std::cout << "Listening to port " << port << std::endl;
+    std::cerr << "Listening to port " << port << std::endl;
   } else {
     std::cerr << "Failed to listen to port" << std::endl;
     return -1;
