@@ -5,13 +5,16 @@
 #include <string>
 #include "json.hpp"
 #include "PID.h"
+#include "TwiddleOpt.h"
 #include <iomanip>
-
+#include <vector>
+#include <numeric>
 
 // for convenience
 using nlohmann::json;
 using namespace std;
 using std::ostream;
+using std::pair;
 
 constexpr bool VERBOSE = false;
 
@@ -45,65 +48,97 @@ struct State {
   double cte;
   double speed;
 
-  double smooth_steer = 0;
-
-  int msg_cnt;
-  double integ_abs_cte = 0.0 ;
+  int msg_cnt = 0;
+  double integ_abs_cte = 0.0;
   double integ_cte = 0.0;
-  double integ_speed = 0.0 ;
+  double integ_speed = 0.0;
+
+  TwiddleOptimizer opt;
+  
+  State( const vector<double>& init_pars, const vector<double> init_dp ) : opt( init_pars, init_dp ) {};
+
+  void Reset() { msg_cnt = 0; integ_abs_cte = 0; integ_speed = 0.0; };
+  double AvgSpeed() const { return integ_speed / msg_cnt; }
+  double AvgAbsCte() const { return integ_abs_cte / msg_cnt; }
+  double AvgCte() const { return integ_cte /msg_cnt; }
+  double DistProxy() const { return integ_speed * 0.02; }
 };
 
-using std::pair;
-
-inline void final_output( ostream& os, const State& state, const Params& pars ) {
-  os << std::fixed << std::setprecision(7) << pars.kp << "\t" << pars.ki << "\t" << pars.kd << "\t" << pars.throttle 
-          << "\t" << state.msg_cnt << "\t" << state.integ_abs_cte / state.msg_cnt << "\t" << state.integ_cte / state.msg_cnt 
-          << "\t" << state.integ_speed * 0.02 << endl;
+inline void final_output( ostream& os, const State& state, const tuple<double,double,double> pars, double throttle ) {
+  os << std::fixed << std::setprecision(7) << get<0>(pars) << "\t" << get<1>(pars) << "\t" << get<2>(pars) 
+          << "\t" << throttle 
+          << "\t" << state.msg_cnt << "\t" << state.AvgAbsCte() << "\t" << state.AvgCte()
+          << "\t" << state.DistProxy() << "\t" << state.AvgSpeed() << endl;
     
 }
 
-pair<double, double>  process( const Params& pars, PID &pid, State &state ) {
+pair<double, double>  process(  PID &pid, State &state, double throttle ) {
   state.integ_abs_cte += fabs( state.cte );
   state.integ_speed += state.speed;
   
-  if( fabs( state.cte ) > 3.0  || state.msg_cnt >= 10000 ) {
+  if( fabs( state.cte ) > 3.0   ) {
     auto err_parts = pid.ErrorParts();
     state.integ_cte = get<1>( err_parts );
-    final_output( cout, state, pars );
-    final_output( cerr, state, pars );
+    final_output( cout, state, pid.Pars(), throttle );
+    final_output( cerr, state, pid.Pars(), throttle );
     exit(1);
   }
+  if( state.DistProxy() >= 10000 ) {
+    
+    final_output( cout, state, pid.Pars(), throttle );
+    final_output( cerr, state, pid.Pars(), throttle );
+    
+    double err = state.AvgAbsCte() / state.AvgSpeed() ;
+    auto pars = state.opt.eval_result( err );
+
+    state.Reset();
+    
+    pid.Set( pars[0], pars[1], pars[2] ); 
+
+    if( state.opt.IsDone() ) {
+      cerr << " Done! " << state.opt.BestPars() << " best err " << state.opt.BestErr() << endl; 
+      exit(1);
+    }
+
+  } 
+
   state.msg_cnt++;
   //double angle = std::stod(j[1]["steering_angle"].get<string>());
   pid.UpdateError( state.cte );
   double steer_value = pid.SteerValue() ;
-  state.smooth_steer = state.smooth_steer * pars.smooth_alpha + ( 1.0 - pars.smooth_alpha ) * steer_value;
   
   auto err_parts = pid.ErrorParts();
 
   if( VERBOSE ) {
     cerr  << std:: fixed <<  std::setprecision(4) 
-          << state.msg_cnt << " speed: " << state.speed << " CTE: " << state.cte << " Steering Value: " << state.smooth_steer 
+          << state.msg_cnt << " speed: " << state.speed << " CTE: " << state.cte << " Steering Value: " << steer_value 
           << " errors: " << get<0>( err_parts ) << " " << get<1>( err_parts ) << " "<< get<2>( err_parts )
-          << " dist: " << state.integ_speed * 0.02
+          << " dist_proxy: " << state.DistProxy()
           << std::endl;
   }
 
-  return std::make_pair(state.smooth_steer, pars.throttle );
-}
+  double cte_dt = get<2>( err_parts );
 
+  double out_throttle = throttle * std::max( 1 - (state.cte * state.cte) / 4.5  -cte_dt * cte_dt / 0.04  , -1.0 );
+  return std::make_pair(steer_value, out_throttle );
+}
 
 int main(int narg, char **argv) {
 
-  State state;
-  Params pars;
+  Params pars0;
 
   assert( narg == 5 );
   
-  pars.kp = atof( argv[1] );
-  pars.ki = atof( argv[2] );
-  pars.kd = atof( argv[3] );
-  pars.throttle = atof( argv[4] );
+  pars0.kp = atof( argv[1] );
+  pars0.ki = atof( argv[2] );
+  pars0.kd = atof( argv[3] );
+  pars0.throttle = atof( argv[4] );
+  double max_throttle = pars0.throttle;
+
+  vector<double> init_pars{ pars0.kp, pars0.ki, pars0.kd};
+  vector<double> init_dp{ 0.01, 0.00001, 0.1 };
+
+  State state( init_pars, init_dp );
 
   uWS::Hub h;
 
@@ -111,13 +146,15 @@ int main(int narg, char **argv) {
   //PID pid(0.04, 0.000, 0.00); 
   //PID pid(0.10, 0.000, 0.001); // 4000 steps
   //PID pid(0.02, 0.000, 0.001); // 1586 steps
-  PID pid(pars.kp, pars.ki, pars.kd ); // 1586 steps
+  auto pars = state.opt.eval_result( NaN );
+
+  PID pid(pars[0], pars[1], pars[2] ); // 1586 steps
 
   /**
    * TODO: Initialize the pid variable.
    */ 
 
-  h.onMessage([ &pid, &state, &pars]
+  h.onMessage([ &pid, &state, max_throttle ]
               (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -136,7 +173,7 @@ int main(int narg, char **argv) {
           state.cte = std::stod(j[1]["cte"].get<string>());
           state.speed = std::stod(j[1]["speed"].get<string>());
           
-          auto result = process( pars, pid, state );
+          auto result = process(  pid, state, max_throttle );
           
           json msgJson;
           msgJson["steering_angle"] = result.first;

@@ -17,6 +17,7 @@ void PID::Set(double Kp_, double Ki_, double Kd_) {
   Kp = Kp_;
   Ki = Ki_;
   Kd  = Kd_;
+  i_error = 0.0;
 }
 
 void PID::UpdateError(double cte) {

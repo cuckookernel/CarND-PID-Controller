@@ -30,6 +30,8 @@ class PID {
   void UpdateError(double cte);
 
   triple ErrorParts();
+
+  triple Pars() {  return std::make_tuple(Kp, Ki, Kd); }
   
 
   /**
