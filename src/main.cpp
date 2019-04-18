@@ -1,4 +1,3 @@
-#include <cmath>
 #include <uWS/uWS.h>
 #include <ostream>
 #include <iostream>
@@ -6,6 +5,7 @@
 #include "json.hpp"
 #include "PID.h"
 #include "TwiddleOpt.h"
+#include <cmath>
 #include <iomanip>
 #include <vector>
 #include <numeric>
@@ -57,7 +57,7 @@ struct State {
   
   State( const vector<double>& init_pars, const vector<double> init_dp ) : opt( init_pars, init_dp ) {};
 
-  void Reset() { msg_cnt = 0; integ_abs_cte = 0; integ_speed = 0.0; };
+  void Reset() { msg_cnt = 0; integ_abs_cte = 0; integ_speed = 0.0; integ_cte = 0.0; };
   double AvgSpeed() const { return integ_speed / msg_cnt; }
   double AvgAbsCte() const { return integ_abs_cte / msg_cnt; }
   double AvgCte() const { return integ_cte /msg_cnt; }
@@ -72,21 +72,24 @@ inline void final_output( ostream& os, const State& state, const tuple<double,do
     
 }
 
-pair<double, double>  process(  PID &pid, State &state, double throttle ) {
+// processes one message and updates the state
+// returns a pair containing steer_value and throttle 
+pair<double, double>  process(  PID &pid, State &state, double max_throttle ) {
   state.integ_abs_cte += fabs( state.cte );
   state.integ_speed += state.speed;
   
-  if( fabs( state.cte ) > 3.0   ) {
+  if( fabs( state.cte ) > 3.0   ) { // if we deviate too  much terminate the program 
     auto err_parts = pid.ErrorParts();
     state.integ_cte = get<1>( err_parts );
-    final_output( cout, state, pid.Pars(), throttle );
-    final_output( cerr, state, pid.Pars(), throttle );
+    final_output( cout, state, pid.Pars(), max_throttle );
+    final_output( cerr, state, pid.Pars(), max_throttle );
     exit(1);
   }
-  if( state.DistProxy() >= 10000 ) {
+
+  if( state.DistProxy() >= 10000 ) { // this happens roughly once every two laps
     
-    final_output( cout, state, pid.Pars(), throttle );
-    final_output( cerr, state, pid.Pars(), throttle );
+    final_output( cout, state, pid.Pars(), max_throttle );
+    final_output( cerr, state, pid.Pars(), max_throttle );
     
     double err = state.AvgAbsCte() / state.AvgSpeed() ;
     auto pars = state.opt.eval_result( err );
@@ -119,7 +122,7 @@ pair<double, double>  process(  PID &pid, State &state, double throttle ) {
 
   double cte_dt = get<2>( err_parts );
 
-  double out_throttle = throttle * std::max( 1 - (state.cte * state.cte) / 4.5  -cte_dt * cte_dt / 0.04  , -1.0 );
+  double out_throttle = max_throttle * std::max( 1 - (state.cte * state.cte) / 4.5  -cte_dt * cte_dt / 0.04  , -1.0 );
   return std::make_pair(steer_value, out_throttle );
 }
 
@@ -127,12 +130,22 @@ int main(int narg, char **argv) {
 
   Params pars0;
 
-  assert( narg == 5 );
+  assert( (narg == 5) || (narg==1) );
   
-  pars0.kp = atof( argv[1] );
-  pars0.ki = atof( argv[2] );
-  pars0.kd = atof( argv[3] );
-  pars0.throttle = atof( argv[4] );
+  if( narg == 5 ) { //if program was invoked with exactly 4 arguments, take initial set of PID params + max_throttle from there
+    pars0.kp = atof( argv[1] );
+    pars0.ki = atof( argv[2] );
+    pars0.kd = atof( argv[3] );
+    pars0.throttle = atof( argv[4] );
+  } else {  // if program is called without arguments
+    //  use  the parameters that were found to be best via hyper-param tuning algo
+    // 0.1850000	0.0004150	4.5000000	3.0000000 taken from a line in record_varthr.txt 
+    pars0.kp = 0.1850;
+    pars0.ki = 0.000415;
+    pars0.kd = 4.50;
+    pars0.throttle = 3.0;
+  }
+
   double max_throttle = pars0.throttle;
 
   vector<double> init_pars{ pars0.kp, pars0.ki, pars0.kd};
@@ -142,10 +155,6 @@ int main(int narg, char **argv) {
 
   uWS::Hub h;
 
-  //PID pid(0.02, 0.0004, 0.03); // order is p, i, d
-  //PID pid(0.04, 0.000, 0.00); 
-  //PID pid(0.10, 0.000, 0.001); // 4000 steps
-  //PID pid(0.02, 0.000, 0.001); // 1586 steps
   auto pars = state.opt.eval_result( NaN );
 
   PID pid(pars[0], pars[1], pars[2] ); // 1586 steps
